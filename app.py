@@ -58,7 +58,7 @@ def get_partners():
 	     FROM (
 		     SELECT payment_id as id, term.name
 		     FROM (SELECT split_part(res_id, ',', 2)::int AS partner_id,split_part(value_reference, ',', 2)::int AS payment_id 
-			   FROM ir_property 
+			   FROM ir_property
 			   WHERE name = 'property_payment_term' AND fields_id=1363) AS payment_term 
 		     LEFT JOIN account_payment_term term ON (term.id = payment_term.payment_id)
 		     WHERE partner_id = part.id
@@ -77,8 +77,20 @@ def get_partners():
                 WHERE add.partner_id = part.id
 		and add.name is not null
         ) d
-        ) as address
+        ) as address,
+	coalesce(pricelist.sale_pricelist_id, 1) as sale_pricelist_id,
+	(SELECT row_to_json(d)
+		FROM (
+		SELECT id, name
+		   FROM res_users
+		 WHERE id = part.user_id
+	) as d
+	) as sales_person
 	FROM res_partner part
+	LEFT JOIN(
+		SELECT split_part(res_id, ',', 2)::int AS partner_id,split_part(value_reference, ',', 2)::int AS sale_pricelist_id 
+		FROM ir_property
+		WHERE name = 'property_product_pricelist' AND fields_id=950) as pricelist on (pricelist.partner_id = part.id)
 	) t
 	'''
     cr.execute(sql)
@@ -95,6 +107,82 @@ def get_categories():
     cr.execute(sql)
     categories = cr.fetchone()
     return jsonify({'data': categories and categories[0]})
+
+@app.route('/export/pricelists', methods=['GET'])
+def get_pricelists():
+    sql = '''
+SELECT array_to_json(array_agg(row_to_json(t)))
+FROM (
+SELECT
+	pricelist.id,
+	pricelist.name,
+	pricelist.active,
+	(
+		SELECT row_to_json(d)
+		FROM (
+			SELECT id, name FROM res_currency
+			WHERE id=pricelist.currency_id) as d
+	) as currency,
+	(
+		SELECT array_to_json(array_agg(row_to_json(d)))
+		FROM (
+			SELECT item.id,
+				   item.name,
+				   item.product_id,
+				   item.categ_id,
+				   item.sequence,
+				   item.min_quantity,
+				   item.base,
+				   item.base_pricelist_id,
+				   item.price_discount,
+				   item.price_surcharge,
+				   item.price_round,
+				   item.price_min_margin,
+				   item.price_max_margin
+				   FROM product_pricelist_version version
+			LEFT JOIN product_pricelist_item AS item ON
+				(item.price_version_id = version.id)
+			WHERE version.pricelist_id = pricelist.id ) AS d
+	) as rules
+FROM
+	product_pricelist pricelist
+) AS t
+'''
+    cr.execute(sql)
+    priceslists = cr.fetchone()
+    return jsonify({'data': priceslists and priceslists[0]})
+
+
+@app.route('/export/sales', methods=['GET'])
+def get_sales():
+    sql = '''
+	SELECT row_to_json(t)
+	FROM (
+	SELECT
+		CASE WHEN inv.type='out_invoice' THEN 'Sale'
+		ELSE 'Refund'
+		END AS type,
+		inv.date_invoice,
+		inv.partner_id,
+		line.product_id,
+		line.quantity AS qty,
+		line.price_subtotal AS amount,
+		coalesce(product.standard_price, 0.0) AS cost_price,
+		line.price_subtotal - (product.standard_price * line.quantity) AS margin
+	FROM account_invoice inv
+	LEFT JOIN account_invoice_line line
+		ON (line.invoice_id = inv.id)
+	LEFT JOIN (SELECT prod.id, templ.standard_price FROM product_product prod
+		LEFT JOIN product_template templ ON (prod.product_tmpl_id = templ.id)) product ON (product.id = line.product_id)
+	WHERE
+		inv.type IN ('out_invoice', 'out_refund')
+		AND inv.state not in ('draft', 'cancel')
+	) t
+'''
+    cr.execute(sql)
+    sales = cr.fetchall()
+    return jsonify({'data': sales})
+
 
 @app.route('/export/products', methods=['GET'])
 def get_products():
@@ -209,10 +297,8 @@ LEFT JOIN product_template tmpl
         ON (tmpl.id = prod.product_tmpl_id)
 ) t
 	'''
-    print sql
     cr.execute(sql)
     products = cr.fetchone()
-    print products 
     return jsonify({'data': products and products[0]})
 
 @app.errorhandler(404)
